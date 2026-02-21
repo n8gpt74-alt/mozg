@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { type KeyboardEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -22,7 +22,17 @@ type ValidateResponse = {
   };
 };
 
+type MatchPreview = {
+  id: string;
+  similarity: number;
+};
+
 type MenuSection = "session" | "ai" | "memory" | "storage";
+
+type SectionStatus = {
+  ready: boolean;
+  note: string;
+};
 
 const sectionMeta: Record<MenuSection, { label: string; hint: string }> = {
   session: {
@@ -42,6 +52,9 @@ const sectionMeta: Record<MenuSection, { label: string; hint: string }> = {
     hint: "Создай подписанный URL для загрузки файла в Supabase Storage в папку текущего пользователя.",
   },
 };
+
+const AI_PROMPT_MAX_LENGTH = 4000;
+const AI_PROMPT_SOFT_LIMIT = 3400;
 
 function getErrorMessage(error: unknown) {
   if (error instanceof Error) {
@@ -65,6 +78,10 @@ export function TelegramShell() {
   const [error, setError] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [activeSection, setActiveSection] = useState<MenuSection>("session");
+  const [isCheckingSession, setIsCheckingSession] = useState(false);
+  const [lastSessionCheckAt, setLastSessionCheckAt] = useState<string | null>(null);
+  const [aiMatches, setAiMatches] = useState<MatchPreview[]>([]);
+  const [lastAiResponseAt, setLastAiResponseAt] = useState<string | null>(null);
 
   const sessionRef = useRef<HTMLDivElement | null>(null);
   const aiRef = useRef<HTMLDivElement | null>(null);
@@ -93,37 +110,125 @@ export function TelegramShell() {
     };
   }, [effectiveInitData]);
 
-  useEffect(() => {
+  const trimmedPrompt = useMemo(() => prompt.trim(), [prompt]);
+  const promptLength = trimmedPrompt.length;
+  const promptCharsLeft = AI_PROMPT_MAX_LENGTH - promptLength;
+  const isPromptTooLong = promptLength > AI_PROMPT_MAX_LENGTH;
+  const isPromptNearLimit = promptLength >= AI_PROMPT_SOFT_LIMIT;
+  const canAskAi = Boolean(authHeaders) && !isSubmitting && Boolean(trimmedPrompt) && !isPromptTooLong;
+
+  const sectionStatus = useMemo<Record<MenuSection, SectionStatus>>(() => {
+    const hasSession = Boolean(authInfo);
+    const hasAuthSource = Boolean(effectiveInitData);
+    const hasPrompt = Boolean(trimmedPrompt);
+    const hasMemory = Boolean(memoryInput.trim());
+    const hasFileName = Boolean(fileName.trim());
+
+    return {
+      session: {
+        ready: hasSession,
+        note: isCheckingSession
+          ? "Проверяем сессию"
+          : hasSession
+            ? "Сессия подтверждена"
+            : hasAuthSource
+              ? "Нужна проверка"
+              : "Нужен initData",
+      },
+      ai: {
+        ready: hasSession && hasPrompt && !isPromptTooLong,
+        note: !hasSession
+          ? "Сначала подтверди сессию"
+          : isPromptTooLong
+            ? `Сократи вопрос до ${AI_PROMPT_MAX_LENGTH} символов`
+            : hasPrompt
+              ? "Вопрос готов"
+              : "Добавь вопрос",
+      },
+      memory: {
+        ready: hasSession && hasMemory,
+        note: !hasSession ? "Сначала подтверди сессию" : hasMemory ? "Текст готов" : "Добавь заметку",
+      },
+      storage: {
+        ready: hasSession && hasFileName,
+        note: !hasSession ? "Сначала подтверди сессию" : hasFileName ? "Имя файла готово" : "Укажи имя файла",
+      },
+    };
+  }, [
+    authInfo,
+    effectiveInitData,
+    fileName,
+    isCheckingSession,
+    isPromptTooLong,
+    memoryInput,
+    trimmedPrompt,
+  ]);
+
+  const readySectionsCount = useMemo(() => {
+    return (Object.keys(sectionStatus) as MenuSection[]).filter((section) => sectionStatus[section].ready).length;
+  }, [sectionStatus]);
+
+  const bestMatchPercent = useMemo(() => {
+    if (!aiMatches.length) {
+      return null;
+    }
+
+    return Math.round(Math.max(...aiMatches.map((match) => match.similarity)) * 100);
+  }, [aiMatches]);
+
+  const validateSession = useCallback(async () => {
     if (!effectiveInitData) {
+      setAuthInfo(null);
       return;
     }
 
-    const run = async () => {
-      try {
-        setError("");
+    try {
+      setIsCheckingSession(true);
+      setError("");
 
-        const response = await fetch("/api/telegram/validate", {
-          method: "POST",
-          headers: {
-            Authorization: `tma ${effectiveInitData}`,
-          },
-        });
+      const response = await fetch("/api/telegram/validate", {
+        method: "POST",
+        headers: {
+          Authorization: `tma ${effectiveInitData}`,
+        },
+      });
 
-        if (!response.ok) {
-          const payload = (await response.json()) as { error?: string };
-          throw new Error(payload.error ?? "Не удалось подтвердить Telegram-сессию");
-        }
-
-        const payload = (await response.json()) as ValidateResponse;
-        setAuthInfo(payload);
-      } catch (requestError) {
-        setAuthInfo(null);
-        setError(getErrorMessage(requestError));
+      if (!response.ok) {
+        const payload = (await response.json()) as { error?: string };
+        throw new Error(payload.error ?? "Не удалось подтвердить Telegram-сессию");
       }
-    };
 
-    void run();
+      const payload = (await response.json()) as ValidateResponse;
+      setAuthInfo(payload);
+      setLastSessionCheckAt(
+        new Date().toLocaleTimeString("ru-RU", {
+          hour: "2-digit",
+          minute: "2-digit",
+        }),
+      );
+    } catch (requestError) {
+      setAuthInfo(null);
+      setError(getErrorMessage(requestError));
+      setLastSessionCheckAt(
+        new Date().toLocaleTimeString("ru-RU", {
+          hour: "2-digit",
+          minute: "2-digit",
+        }),
+      );
+    } finally {
+      setIsCheckingSession(false);
+    }
   }, [effectiveInitData]);
+
+  useEffect(() => {
+    if (!effectiveInitData) {
+      setAuthInfo(null);
+      setLastSessionCheckAt(null);
+      return;
+    }
+
+    void validateSession();
+  }, [effectiveInitData, validateSession]);
 
   function goToSection(section: MenuSection) {
     setActiveSection(section);
@@ -131,31 +236,64 @@ export function TelegramShell() {
   }
 
   async function handleAsk() {
-    if (!authHeaders || !prompt.trim()) {
+    if (!authHeaders || !trimmedPrompt) {
+      return;
+    }
+
+    if (isPromptTooLong) {
+      setError(`Вопрос слишком длинный. Максимум ${AI_PROMPT_MAX_LENGTH} символов.`);
       return;
     }
 
     try {
       setIsSubmitting(true);
       setError("");
+      setAnswer("");
+      setAiMatches([]);
 
       const response = await fetch("/api/ai/complete", {
         method: "POST",
         headers: authHeaders,
-        body: JSON.stringify({ prompt }),
+        body: JSON.stringify({ prompt: trimmedPrompt }),
       });
 
-      const payload = (await response.json()) as { text?: string; error?: string };
+      const payload = (await response.json()) as {
+        text?: string;
+        matches?: MatchPreview[];
+        error?: string;
+      };
 
       if (!response.ok) {
         throw new Error(payload.error ?? "Ошибка запроса к ИИ");
       }
 
       setAnswer(payload.text ?? "");
+      setAiMatches(payload.matches ?? []);
+      setLastAiResponseAt(
+        new Date().toLocaleTimeString("ru-RU", {
+          hour: "2-digit",
+          minute: "2-digit",
+        }),
+      );
     } catch (requestError) {
+      setAiMatches([]);
       setError(getErrorMessage(requestError));
     } finally {
       setIsSubmitting(false);
+    }
+  }
+
+  function handleClearAskState() {
+    setPrompt("");
+    setAnswer("");
+    setAiMatches([]);
+    setError("");
+  }
+
+  function handlePromptKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
+    if ((event.ctrlKey || event.metaKey) && event.key === "Enter") {
+      event.preventDefault();
+      void handleAsk();
     }
   }
 
@@ -235,17 +373,34 @@ export function TelegramShell() {
           <CardDescription>Быстрые переходы и подсказки по каждому разделу.</CardDescription>
         </CardHeader>
         <CardContent className="space-y-3">
+          <p className="text-xs text-[var(--tg-theme-hint-color)]">
+            Готовность: {readySectionsCount}/4 блоков готовы к действию.
+          </p>
           <div className="grid grid-cols-2 gap-2">
-            {(Object.keys(sectionMeta) as MenuSection[]).map((section) => (
-              <Button
-                key={section}
-                variant={activeSection === section ? "default" : "secondary"}
-                onClick={() => goToSection(section)}
-                className="w-full"
-              >
-                {sectionMeta[section].label}
-              </Button>
-            ))}
+            {(Object.keys(sectionMeta) as MenuSection[]).map((section) => {
+              const status = sectionStatus[section];
+
+              return (
+                <Button
+                  key={section}
+                  variant={activeSection === section ? "default" : "secondary"}
+                  aria-pressed={activeSection === section}
+                  onClick={() => goToSection(section)}
+                  className="h-auto w-full flex-col items-start gap-1 px-3 py-2 text-left"
+                >
+                  <span className="leading-tight">{sectionMeta[section].label}</span>
+                  <span
+                    className={
+                      status.ready
+                        ? "text-xs font-medium text-emerald-500 dark:text-emerald-400"
+                        : "text-xs text-[var(--tg-theme-hint-color)]"
+                    }
+                  >
+                    {status.note}
+                  </span>
+                </Button>
+              );
+            })}
           </div>
           <p className="rounded-xl bg-[var(--tg-theme-bg-color)] p-3 text-sm text-[var(--tg-theme-hint-color)]">
             Подсказка: {sectionMeta[activeSection].hint}
@@ -260,7 +415,31 @@ export function TelegramShell() {
             Тема Telegram: <span className="font-medium">{colorScheme === "dark" ? "тёмная" : "светлая"}</span>
           </CardDescription>
         </CardHeader>
-        <CardContent className="space-y-2 text-sm">
+        <CardContent className="space-y-3 text-sm">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <span
+              className={
+                authInfo
+                  ? "rounded-full bg-emerald-500/15 px-3 py-1 text-xs font-medium text-emerald-600 dark:text-emerald-400"
+                  : "rounded-full bg-amber-500/15 px-3 py-1 text-xs font-medium text-amber-600 dark:text-amber-400"
+              }
+            >
+              {authInfo ? "Сессия активна" : isCheckingSession ? "Проверяем сессию" : "Сессия не подтверждена"}
+            </span>
+            <Button
+              variant="outline"
+              className="min-h-9 px-3 text-xs"
+              disabled={!effectiveInitData || isCheckingSession}
+              onClick={validateSession}
+            >
+              {isCheckingSession ? "Проверяем..." : "Проверить сессию"}
+            </Button>
+          </div>
+
+          <p className="text-xs text-[var(--tg-theme-hint-color)]">
+            {lastSessionCheckAt ? `Последняя проверка: ${lastSessionCheckAt}` : "Проверка ещё не запускалась"}
+          </p>
+
           {isTelegram ? (
             <p>
               Пользователь Telegram: <strong>{initDataUnsafe?.user?.first_name ?? "неизвестно"}</strong>
@@ -277,6 +456,12 @@ export function TelegramShell() {
               />
             </div>
           )}
+
+          {!effectiveInitData ? (
+            <p className="rounded-xl bg-[var(--tg-theme-bg-color)] p-3 text-xs text-[var(--tg-theme-hint-color)]">
+              Нет initData. В Telegram он подхватится автоматически, в браузере вставь его вручную.
+            </p>
+          ) : null}
 
           {authInfo ? (
             <p>
@@ -298,12 +483,51 @@ export function TelegramShell() {
           <Textarea
             value={prompt}
             onChange={(event) => setPrompt(event.target.value)}
+            onKeyDown={handlePromptKeyDown}
             placeholder="Например: Какие ключевые задачи на сегодня?"
           />
-          <Button className="w-full" disabled={!authHeaders || isSubmitting || !prompt.trim()} onClick={handleAsk}>
-            Получить ответ
-          </Button>
-          {answer ? <p className="rounded-xl bg-[var(--tg-theme-bg-color)] p-3 text-sm">{answer}</p> : null}
+          <div className="flex items-center justify-between text-xs">
+            <span
+              className={
+                isPromptTooLong
+                  ? "font-medium text-red-500"
+                  : isPromptNearLimit
+                    ? "font-medium text-amber-500"
+                    : "text-[var(--tg-theme-hint-color)]"
+              }
+            >
+              {isPromptTooLong
+                ? `Превышение лимита: ${Math.abs(promptCharsLeft)} симв.`
+                : `Осталось символов: ${promptCharsLeft}` }
+            </span>
+            <span className="text-[var(--tg-theme-hint-color)]">Ctrl/Cmd + Enter</span>
+          </div>
+          <div className="flex gap-2">
+            <Button className="flex-1" disabled={!canAskAi} onClick={handleAsk}>
+              {isSubmitting ? "Генерирую ответ..." : "Получить ответ"}
+            </Button>
+            <Button
+              variant="outline"
+              className="px-4"
+              disabled={isSubmitting || (!prompt && !answer && !aiMatches.length)}
+              onClick={handleClearAskState}
+            >
+              Очистить
+            </Button>
+          </div>
+          {lastAiResponseAt ? (
+            <p className="text-xs text-[var(--tg-theme-hint-color)]">Последний ответ: {lastAiResponseAt}</p>
+          ) : null}
+          {answer ? (
+            <div className="rounded-xl bg-[var(--tg-theme-bg-color)] p-3">
+              <p className="text-sm">{answer}</p>
+              <p className="mt-2 text-xs text-[var(--tg-theme-hint-color)]">
+                {aiMatches.length
+                  ? `Контекст памяти: ${aiMatches.length} заметок, лучшая релевантность ~${bestMatchPercent ?? 0}%.`
+                  : "Контекст памяти не использован для этого ответа."}
+              </p>
+            </div>
+          ) : null}
         </CardContent>
       </Card>
 
