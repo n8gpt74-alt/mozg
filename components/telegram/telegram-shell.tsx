@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -22,12 +22,33 @@ type ValidateResponse = {
   };
 };
 
+type MenuSection = "session" | "ai" | "memory" | "storage";
+
+const sectionMeta: Record<MenuSection, { label: string; hint: string }> = {
+  session: {
+    label: "Профиль",
+    hint: "Проверь, что сессия Telegram подтверждена. Без этого защищённые API не будут работать.",
+  },
+  ai: {
+    label: "Вопрос к ИИ",
+    hint: "Задай вопрос. Ответ строится с учётом сохранённой памяти из pgvector.",
+  },
+  memory: {
+    label: "Память",
+    hint: "Сохрани заметку в векторную память. Потом ИИ сможет использовать её в ответах.",
+  },
+  storage: {
+    label: "Файлы",
+    hint: "Создай подписанный URL для загрузки файла в Supabase Storage в папку текущего пользователя.",
+  },
+};
+
 function getErrorMessage(error: unknown) {
   if (error instanceof Error) {
     return error.message;
   }
 
-  return "Unexpected error";
+  return "Неизвестная ошибка";
 }
 
 export function TelegramShell() {
@@ -43,10 +64,34 @@ export function TelegramShell() {
   const [uploadPreview, setUploadPreview] = useState("");
   const [error, setError] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [activeSection, setActiveSection] = useState<MenuSection>("session");
+
+  const sessionRef = useRef<HTMLDivElement | null>(null);
+  const aiRef = useRef<HTMLDivElement | null>(null);
+  const memoryRef = useRef<HTMLDivElement | null>(null);
+  const storageRef = useRef<HTMLDivElement | null>(null);
+
+  const sectionRefs: Record<MenuSection, React.RefObject<HTMLDivElement | null>> = {
+    session: sessionRef,
+    ai: aiRef,
+    memory: memoryRef,
+    storage: storageRef,
+  };
 
   const effectiveInitData = useMemo(() => {
     return initData || manualInitData.trim();
   }, [initData, manualInitData]);
+
+  const authHeaders = useMemo(() => {
+    if (!effectiveInitData) {
+      return null;
+    }
+
+    return {
+      Authorization: `tma ${effectiveInitData}`,
+      "Content-Type": "application/json",
+    };
+  }, [effectiveInitData]);
 
   useEffect(() => {
     if (!effectiveInitData) {
@@ -66,7 +111,7 @@ export function TelegramShell() {
 
         if (!response.ok) {
           const payload = (await response.json()) as { error?: string };
-          throw new Error(payload.error ?? "Failed to validate Telegram session");
+          throw new Error(payload.error ?? "Не удалось подтвердить Telegram-сессию");
         }
 
         const payload = (await response.json()) as ValidateResponse;
@@ -80,16 +125,10 @@ export function TelegramShell() {
     void run();
   }, [effectiveInitData]);
 
-  const authHeaders = useMemo(() => {
-    if (!effectiveInitData) {
-      return null;
-    }
-
-    return {
-      Authorization: `tma ${effectiveInitData}`,
-      "Content-Type": "application/json",
-    };
-  }, [effectiveInitData]);
+  function goToSection(section: MenuSection) {
+    setActiveSection(section);
+    sectionRefs[section].current?.scrollIntoView({ behavior: "smooth", block: "start" });
+  }
 
   async function handleAsk() {
     if (!authHeaders || !prompt.trim()) {
@@ -109,7 +148,7 @@ export function TelegramShell() {
       const payload = (await response.json()) as { text?: string; error?: string };
 
       if (!response.ok) {
-        throw new Error(payload.error ?? "AI completion request failed");
+        throw new Error(payload.error ?? "Ошибка запроса к ИИ");
       }
 
       setAnswer(payload.text ?? "");
@@ -143,11 +182,11 @@ export function TelegramShell() {
       const payload = (await response.json()) as { documentId?: string; error?: string };
 
       if (!response.ok) {
-        throw new Error(payload.error ?? "Embedding write request failed");
+        throw new Error(payload.error ?? "Не удалось сохранить память");
       }
 
       setMemoryInput("");
-      setUploadPreview(`Memory stored: ${payload.documentId}`);
+      setUploadPreview(`Память сохранена: ${payload.documentId}`);
     } catch (requestError) {
       setError(getErrorMessage(requestError));
     } finally {
@@ -177,10 +216,10 @@ export function TelegramShell() {
       };
 
       if (!response.ok) {
-        throw new Error(payload.error ?? "Signed upload URL request failed");
+        throw new Error(payload.error ?? "Не удалось создать ссылку загрузки");
       }
 
-      setUploadPreview(`Upload ready: ${payload.path}`);
+      setUploadPreview(`Ссылка готова: ${payload.path}`);
     } catch (requestError) {
       setError(getErrorMessage(requestError));
     } finally {
@@ -192,20 +231,44 @@ export function TelegramShell() {
     <div className="flex w-full flex-col gap-4 pb-4">
       <Card>
         <CardHeader>
-          <CardTitle>Megamozg Mini App</CardTitle>
+          <CardTitle>Меню</CardTitle>
+          <CardDescription>Быстрые переходы и подсказки по каждому разделу.</CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-3">
+          <div className="grid grid-cols-2 gap-2">
+            {(Object.keys(sectionMeta) as MenuSection[]).map((section) => (
+              <Button
+                key={section}
+                variant={activeSection === section ? "default" : "secondary"}
+                onClick={() => goToSection(section)}
+                className="w-full"
+              >
+                {sectionMeta[section].label}
+              </Button>
+            ))}
+          </div>
+          <p className="rounded-xl bg-[var(--tg-theme-bg-color)] p-3 text-sm text-[var(--tg-theme-hint-color)]">
+            Подсказка: {sectionMeta[activeSection].hint}
+          </p>
+        </CardContent>
+      </Card>
+
+      <Card ref={sessionRef}>
+        <CardHeader>
+          <CardTitle>Профиль и сессия</CardTitle>
           <CardDescription>
-            Telegram theme: <span className="font-medium">{colorScheme}</span>
+            Тема Telegram: <span className="font-medium">{colorScheme === "dark" ? "тёмная" : "светлая"}</span>
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-2 text-sm">
           {isTelegram ? (
             <p>
-              Telegram user: <strong>{initDataUnsafe?.user?.first_name ?? "unknown"}</strong>
+              Пользователь Telegram: <strong>{initDataUnsafe?.user?.first_name ?? "неизвестно"}</strong>
             </p>
           ) : (
             <div className="space-y-2">
               <p className="text-[var(--tg-theme-hint-color)]">
-                Local browser mode. Paste raw initData for secure server validation.
+                Режим браузера. Вставь raw initData для безопасной серверной валидации.
               </p>
               <Textarea
                 value={manualInitData}
@@ -217,19 +280,19 @@ export function TelegramShell() {
 
           {authInfo ? (
             <p>
-              Authenticated as <strong>{authInfo.telegramUser.first_name}</strong>
+              Сессия подтверждена: <strong>{authInfo.telegramUser.first_name}</strong>
               {authInfo.telegramUser.username ? ` (@${authInfo.telegramUser.username})` : ""}
             </p>
           ) : (
-            <p className="text-[var(--tg-theme-hint-color)]">Session is not validated yet.</p>
+            <p className="text-[var(--tg-theme-hint-color)]">Сессия пока не подтверждена.</p>
           )}
         </CardContent>
       </Card>
 
-      <Card>
+      <Card ref={aiRef}>
         <CardHeader>
-          <CardTitle>Ask AI</CardTitle>
-          <CardDescription>Completion via Vercel AI SDK + OpenAI with pgvector context.</CardDescription>
+          <CardTitle>Вопрос к ИИ</CardTitle>
+          <CardDescription>Ответ формируется через Vercel AI SDK + контекст из pgvector.</CardDescription>
         </CardHeader>
         <CardContent className="space-y-3">
           <Textarea
@@ -244,10 +307,10 @@ export function TelegramShell() {
         </CardContent>
       </Card>
 
-      <Card>
+      <Card ref={memoryRef}>
         <CardHeader>
-          <CardTitle>Store memory embedding</CardTitle>
-          <CardDescription>Text is embedded and stored in pgvector with user-scoped RLS.</CardDescription>
+          <CardTitle>Сохранить в память (эмбеддинг)</CardTitle>
+          <CardDescription>Текст сохраняется в векторную память пользователя.</CardDescription>
         </CardHeader>
         <CardContent className="space-y-3">
           <Textarea
@@ -261,15 +324,15 @@ export function TelegramShell() {
             disabled={!authHeaders || isSubmitting || !memoryInput.trim()}
             onClick={handleRemember}
           >
-            Сохранить
+            Сохранить заметку
           </Button>
         </CardContent>
       </Card>
 
-      <Card>
+      <Card ref={storageRef}>
         <CardHeader>
-          <CardTitle>Storage upload URL</CardTitle>
-          <CardDescription>Signed Supabase Storage upload URL scoped to Telegram user folder.</CardDescription>
+          <CardTitle>Загрузка файла</CardTitle>
+          <CardDescription>Создание подписанной ссылки Supabase Storage для текущего пользователя.</CardDescription>
         </CardHeader>
         <CardContent className="space-y-3">
           <Input value={fileName} onChange={(event) => setFileName(event.target.value)} />
@@ -279,10 +342,10 @@ export function TelegramShell() {
             disabled={!authHeaders || isSubmitting || !fileName.trim()}
             onClick={handleCreateUploadUrl}
           >
-            Создать upload URL
+            Создать ссылку загрузки
           </Button>
           {uploadPreview ? (
-            <p className="rounded-xl bg-[var(--tg-theme-bg-color)] p-3 text-xs break-all">{uploadPreview}</p>
+            <p className="break-all rounded-xl bg-[var(--tg-theme-bg-color)] p-3 text-xs">{uploadPreview}</p>
           ) : null}
         </CardContent>
       </Card>

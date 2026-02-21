@@ -3,8 +3,8 @@ import type { Metadata } from "next";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "Megamozg Telegram AI",
-  description: "Telegram Mini App with Supabase, pgvector, and Vercel AI SDK",
+  title: "Мозг — Telegram Mini App",
+  description: "Мини-приложение Telegram с Supabase, pgvector и Vercel AI SDK",
 };
 
 export default function RootLayout({
