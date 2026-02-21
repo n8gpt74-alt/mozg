@@ -69,6 +69,10 @@ const memoryPromptPresets = [
   "Нужно подготовить список рисков и план действий.",
   "Согласовать ТЗ, дедлайн и ответственных по задачам.",
 ];
+const FILE_NAME_MAX_LENGTH = 120;
+const FILE_NAME_SOFT_LIMIT = 100;
+const fileNamePresets = ["notes.txt", "task-plan.md", "report-2026-02-21.txt"];
+
 
 
 
@@ -111,6 +115,9 @@ export function TelegramShell() {
   const [isAnswerCopied, setIsAnswerCopied] = useState(false);
   const [memorySavePreview, setMemorySavePreview] = useState("");
   const [lastMemorySavedAt, setLastMemorySavedAt] = useState<string | null>(null);
+  const [uploadPath, setUploadPath] = useState("");
+  const [lastUploadCreatedAt, setLastUploadCreatedAt] = useState<string | null>(null);
+  const [isUploadPathCopied, setIsUploadPathCopied] = useState(false);
 
   const sessionRef = useRef<HTMLDivElement | null>(null);
   const aiRef = useRef<HTMLDivElement | null>(null);
@@ -174,12 +181,26 @@ export function TelegramShell() {
   const isMemoryNearLimit = memoryLength >= MEMORY_INPUT_SOFT_LIMIT;
   const canRemember = Boolean(authHeaders) && !isSavingMemory && Boolean(trimmedMemoryInput) && !isMemoryTooLong;
 
+  const trimmedFileName = useMemo(() => fileName.trim(), [fileName]);
+  const fileNameLength = trimmedFileName.length;
+  const fileNameCharsLeft = FILE_NAME_MAX_LENGTH - fileNameLength;
+  const isFileNameTooLong = fileNameLength > FILE_NAME_MAX_LENGTH;
+  const isFileNameNearLimit = fileNameLength >= FILE_NAME_SOFT_LIMIT;
+  const sanitizedFileNamePreview = useMemo(() => {
+    if (!trimmedFileName) {
+      return null;
+    }
+
+    return trimmedFileName.replace(/[^a-zA-Z0-9_.-]/g, "_");
+  }, [trimmedFileName]);
+  const canCreateUploadUrl =
+    Boolean(authHeaders) && !isCreatingUploadUrl && Boolean(trimmedFileName) && !isFileNameTooLong;
   const sectionStatus = useMemo<Record<MenuSection, SectionStatus>>(() => {
     const hasSession = Boolean(authInfo);
     const hasAuthSource = Boolean(effectiveInitData);
     const hasPrompt = Boolean(trimmedPrompt);
     const hasMemory = Boolean(trimmedMemoryInput);
-    const hasFileName = Boolean(fileName.trim());
+    const hasFileName = Boolean(trimmedFileName);
 
     return {
       session: {
@@ -213,19 +234,26 @@ export function TelegramShell() {
               : "Добавь заметку",
       },
       storage: {
-        ready: hasSession && hasFileName,
-        note: !hasSession ? "Сначала подтверди сессию" : hasFileName ? "Имя файла готово" : "Укажи имя файла",
+        ready: hasSession && hasFileName && !isFileNameTooLong,
+        note: !hasSession
+          ? "Сначала подтверди сессию"
+          : isFileNameTooLong
+            ? `Сократи имя до ${FILE_NAME_MAX_LENGTH} символов`
+            : hasFileName
+              ? "Имя файла готово"
+              : "Укажи имя файла",
       },
     };
   }, [
     authInfo,
     effectiveInitData,
-    fileName,
     isCheckingSession,
     isPromptTooLong,
     isMemoryTooLong,
+    isFileNameTooLong,
     trimmedMemoryInput,
     trimmedPrompt,
+    trimmedFileName,
   ]);
 
   const readySectionsCount = useMemo(() => {
@@ -479,8 +507,54 @@ export function TelegramShell() {
     }
   }
 
+  function handleFileNameKeyDown(event: KeyboardEvent<HTMLInputElement>) {
+    if ((event.ctrlKey || event.metaKey) && event.key === "Enter") {
+      event.preventDefault();
+      void handleCreateUploadUrl();
+    }
+  }
+
+  function handleApplyFileNamePreset(preset: string) {
+    setFileName(preset);
+    setError("");
+  }
+
+  function handleClearUploadState() {
+    setUploadPreview("");
+    setUploadPath("");
+    setLastUploadCreatedAt(null);
+    setIsUploadPathCopied(false);
+    setError("");
+  }
+
+  async function handleCopyUploadPath() {
+    if (!uploadPath) {
+      return;
+    }
+
+    try {
+      if (!navigator.clipboard?.writeText) {
+        throw new Error("Буфер обмена недоступен в этом окружении");
+      }
+
+      await navigator.clipboard.writeText(uploadPath);
+      setIsUploadPathCopied(true);
+
+      window.setTimeout(() => {
+        setIsUploadPathCopied(false);
+      }, 1600);
+    } catch (copyError) {
+      setError(getErrorMessage(copyError));
+    }
+  }
+
   async function handleCreateUploadUrl() {
-    if (!authHeaders || !fileName.trim()) {
+    if (!authHeaders || !trimmedFileName) {
+      return;
+    }
+
+    if (isFileNameTooLong) {
+      setError(`Имя файла слишком длинное. Максимум ${FILE_NAME_MAX_LENGTH} символов.`);
       return;
     }
 
@@ -491,12 +565,15 @@ export function TelegramShell() {
       const response = await fetch("/api/storage/upload-url", {
         method: "POST",
         headers: authHeaders,
-        body: JSON.stringify({ fileName }),
+        body: JSON.stringify({ fileName: trimmedFileName }),
       });
 
       const payload = (await response.json()) as {
-        signedUrl?: string;
+        bucket?: string;
         path?: string;
+        method?: string;
+        signedUrl?: string;
+        token?: string;
         error?: string;
       };
 
@@ -504,8 +581,23 @@ export function TelegramShell() {
         throw new Error(payload.error ?? "Не удалось создать ссылку загрузки");
       }
 
-      setUploadPreview(`Ссылка готова: ${payload.path}`);
+      const uploadPathValue = payload.path ?? "";
+      setUploadPath(uploadPathValue);
+      setUploadPreview(
+        uploadPathValue
+          ? `Ссылка готова: ${payload.bucket ?? "bucket"}/${uploadPathValue}`
+          : "Ссылка готова",
+      );
+      setLastUploadCreatedAt(
+        new Date().toLocaleTimeString("ru-RU", {
+          hour: "2-digit",
+          minute: "2-digit",
+        }),
+      );
+      setIsUploadPathCopied(false);
     } catch (requestError) {
+      setUploadPath("");
+      setUploadPreview("");
       setError(getErrorMessage(requestError));
     } finally {
       setIsCreatingUploadUrl(false);
@@ -643,7 +735,12 @@ export function TelegramShell() {
                   Очистить initData
                 </Button>
               </div>
+              <label htmlFor="manual-init-data" className="sr-only">
+                Raw initData для проверки Telegram-сессии
+              </label>
               <Textarea
+                id="manual-init-data"
+                aria-label="Raw initData для проверки Telegram-сессии"
                 value={manualInitData}
                 onChange={(event) => setManualInitData(event.target.value)}
                 placeholder="query_id=...&user=...&auth_date=...&hash=..."
@@ -677,7 +774,12 @@ export function TelegramShell() {
           <CardDescription>Ответ формируется через Vercel AI SDK + контекст из pgvector.</CardDescription>
         </CardHeader>
         <CardContent className="space-y-3">
+          <label htmlFor="ai-prompt" className="sr-only">
+            Вопрос к ИИ
+          </label>
           <Textarea
+            id="ai-prompt"
+            aria-label="Вопрос к ИИ"
             value={prompt}
             onChange={(event) => setPrompt(event.target.value)}
             onKeyDown={handlePromptKeyDown}
@@ -765,7 +867,12 @@ export function TelegramShell() {
           <CardDescription>Текст сохраняется в векторную память пользователя.</CardDescription>
         </CardHeader>
         <CardContent className="space-y-3">
+          <label htmlFor="memory-input" className="sr-only">
+            Заметка для сохранения в память
+          </label>
           <Textarea
+            id="memory-input"
+            aria-label="Заметка для сохранения в память"
             value={memoryInput}
             onChange={(event) => setMemoryInput(event.target.value)}
             onKeyDown={handleMemoryKeyDown}
@@ -828,22 +935,84 @@ export function TelegramShell() {
           <CardDescription>Создание подписанной ссылки Supabase Storage для текущего пользователя.</CardDescription>
         </CardHeader>
         <CardContent className="space-y-3">
-          <Input value={fileName} onChange={(event) => setFileName(event.target.value)} />
-          <Button
-            variant="outline"
-            className="w-full"
-            disabled={!authHeaders || isCreatingUploadUrl || !fileName.trim()}
-            onClick={handleCreateUploadUrl}
-          >
-            {isCreatingUploadUrl ? "Создаю ссылку..." : "Создать ссылку загрузки"}
-          </Button>
+          <label htmlFor="storage-file-name" className="sr-only">
+            Имя файла для генерации upload URL
+          </label>
+          <Input
+            id="storage-file-name"
+            aria-label="Имя файла для генерации upload URL"
+            value={fileName}
+            onChange={(event) => setFileName(event.target.value)}
+            onKeyDown={handleFileNameKeyDown}
+          />
+          <div className="flex flex-wrap gap-2">
+            {fileNamePresets.map((preset) => (
+              <Button
+                key={preset}
+                variant="secondary"
+                className="min-h-8 px-3 text-xs"
+                disabled={isCreatingUploadUrl}
+                onClick={() => handleApplyFileNamePreset(preset)}
+              >
+                {preset}
+              </Button>
+            ))}
+          </div>
+          <div className="flex items-center justify-between text-xs">
+            <span
+              className={
+                isFileNameTooLong
+                  ? "font-medium text-red-500"
+                  : isFileNameNearLimit
+                    ? "font-medium text-amber-500"
+                    : "text-[var(--tg-theme-hint-color)]"
+              }
+            >
+              {isFileNameTooLong
+                ? `Превышение лимита: ${Math.abs(fileNameCharsLeft)} симв.`
+                : `Осталось символов: ${fileNameCharsLeft}`}
+            </span>
+            <span className="text-[var(--tg-theme-hint-color)]">Ctrl/Cmd + Enter</span>
+          </div>
+          {sanitizedFileNamePreview && sanitizedFileNamePreview !== trimmedFileName ? (
+            <p className="rounded-xl bg-[var(--tg-theme-bg-color)] p-2 text-xs text-[var(--tg-theme-hint-color)]">
+              После sanitize: <span className="text-[var(--tg-theme-text-color)]">{sanitizedFileNamePreview}</span>
+            </p>
+          ) : null}
+          <div className="flex flex-wrap gap-2">
+            <Button variant="outline" className="min-w-36 flex-1" disabled={!canCreateUploadUrl} onClick={handleCreateUploadUrl}>
+              {isCreatingUploadUrl ? "Создаю ссылку..." : "Создать ссылку загрузки"}
+            </Button>
+            <Button
+              variant="outline"
+              className="px-4"
+              disabled={!uploadPath || isCreatingUploadUrl}
+              onClick={handleCopyUploadPath}
+            >
+              {isUploadPathCopied ? "Скопировано" : "Копировать путь"}
+            </Button>
+            <Button
+              variant="outline"
+              className="px-4"
+              disabled={isCreatingUploadUrl || (!fileName && !uploadPreview && !uploadPath)}
+              onClick={handleClearUploadState}
+            >
+              Очистить
+            </Button>
+          </div>
+          {lastUploadCreatedAt ? (
+            <p className="text-xs text-[var(--tg-theme-hint-color)]">Последняя ссылка: {lastUploadCreatedAt}</p>
+          ) : null}
           {uploadPreview ? (
             <p className="break-all rounded-xl bg-[var(--tg-theme-bg-color)] p-3 text-xs">{uploadPreview}</p>
+          ) : null}
+          {uploadPath ? (
+            <p className="break-all text-xs text-[var(--tg-theme-hint-color)]">Path: {uploadPath}</p>
           ) : null}
         </CardContent>
       </Card>
 
-      {error ? <p className="rounded-xl bg-red-500/10 p-3 text-sm text-red-500">{error}</p> : null}
+      {error ? <p role="alert" aria-live="assertive" className="rounded-xl bg-red-500/10 p-3 text-sm text-red-500">{error}</p> : null}
     </div>
   );
 }
