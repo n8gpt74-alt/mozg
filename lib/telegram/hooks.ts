@@ -1,8 +1,7 @@
 "use client";
 
-import { useEffect, useSyncExternalStore } from "react";
-import WebApp from "@twa-dev/sdk";
-import type { ThemeParams, WebAppInitData } from "@twa-dev/types";
+import { useEffect, useMemo, useState } from "react";
+import type { ThemeParams, WebApp, WebAppInitData } from "@twa-dev/types";
 
 type TelegramSnapshot = {
   isTelegram: boolean;
@@ -22,43 +21,13 @@ const fallbackSnapshot: TelegramSnapshot = {
 
 let telegramBootstrapped = false;
 
-function bootstrapTelegramWebApp() {
-  if (telegramBootstrapped || typeof window === "undefined") {
-    return;
-  }
-
-  WebApp.ready();
-  WebApp.expand();
-  telegramBootstrapped = true;
-}
-
-function readSnapshot(): TelegramSnapshot {
-  if (typeof window === "undefined") {
-    return fallbackSnapshot;
-  }
-
+function readSnapshot(webApp: WebApp): TelegramSnapshot {
   return {
-    isTelegram: Boolean(WebApp.initData),
-    colorScheme: WebApp.colorScheme,
-    themeParams: WebApp.themeParams,
-    initData: WebApp.initData,
-    initDataUnsafe: WebApp.initDataUnsafe,
-  };
-}
-
-function subscribe(onStoreChange: () => void) {
-  if (typeof window === "undefined") {
-    return () => undefined;
-  }
-
-  const handler = () => onStoreChange();
-
-  WebApp.onEvent("themeChanged", handler);
-  WebApp.onEvent("viewportChanged", handler);
-
-  return () => {
-    WebApp.offEvent("themeChanged", handler);
-    WebApp.offEvent("viewportChanged", handler);
+    isTelegram: Boolean(webApp.initData),
+    colorScheme: webApp.colorScheme,
+    themeParams: webApp.themeParams,
+    initData: webApp.initData,
+    initDataUnsafe: webApp.initDataUnsafe,
   };
 }
 
@@ -86,11 +55,59 @@ function applyThemeVariables(themeParams: Partial<ThemeParams>, colorScheme: "li
 }
 
 export function useTelegramSnapshot() {
+  const [snapshot, setSnapshot] = useState<TelegramSnapshot>(fallbackSnapshot);
+
   useEffect(() => {
-    bootstrapTelegramWebApp();
+    let active = true;
+    let cleanup: (() => void) | undefined;
+
+    const initialize = async () => {
+      try {
+        const sdkModule = await import("@twa-dev/sdk");
+        const webApp = sdkModule.default as WebApp | undefined;
+
+        if (!active || !webApp) {
+          return;
+        }
+
+        if (!telegramBootstrapped) {
+          webApp.ready();
+          webApp.expand();
+          telegramBootstrapped = true;
+        }
+
+        const updateSnapshot = () => {
+          if (!active) {
+            return;
+          }
+
+          setSnapshot(readSnapshot(webApp));
+        };
+
+        updateSnapshot();
+
+        webApp.onEvent("themeChanged", updateSnapshot);
+        webApp.onEvent("viewportChanged", updateSnapshot);
+
+        cleanup = () => {
+          webApp.offEvent("themeChanged", updateSnapshot);
+          webApp.offEvent("viewportChanged", updateSnapshot);
+        };
+      } catch (error) {
+        console.error("Failed to initialize Telegram SDK", error);
+        setSnapshot(fallbackSnapshot);
+      }
+    };
+
+    void initialize();
+
+    return () => {
+      active = false;
+      cleanup?.();
+    };
   }, []);
 
-  return useSyncExternalStore(subscribe, readSnapshot, () => fallbackSnapshot);
+  return snapshot;
 }
 
 export function useTelegramTheme() {
@@ -104,19 +121,25 @@ export function useTelegramTheme() {
     applyThemeVariables(snapshot.themeParams, snapshot.colorScheme);
   }, [snapshot.colorScheme, snapshot.isTelegram, snapshot.themeParams]);
 
-  return {
-    colorScheme: snapshot.colorScheme,
-    themeParams: snapshot.themeParams,
-    isTelegram: snapshot.isTelegram,
-  };
+  return useMemo(
+    () => ({
+      colorScheme: snapshot.colorScheme,
+      themeParams: snapshot.themeParams,
+      isTelegram: snapshot.isTelegram,
+    }),
+    [snapshot.colorScheme, snapshot.isTelegram, snapshot.themeParams],
+  );
 }
 
 export function useTelegramInitData() {
   const snapshot = useTelegramSnapshot();
 
-  return {
-    isTelegram: snapshot.isTelegram,
-    initData: snapshot.initData,
-    initDataUnsafe: snapshot.initDataUnsafe,
-  };
+  return useMemo(
+    () => ({
+      isTelegram: snapshot.isTelegram,
+      initData: snapshot.initData,
+      initDataUnsafe: snapshot.initDataUnsafe,
+    }),
+    [snapshot.initData, snapshot.initDataUnsafe, snapshot.isTelegram],
+  );
 }

@@ -12,7 +12,7 @@ import {
 } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
-import { useTelegramInitData, useTelegramTheme } from "@/lib/telegram/hooks";
+import { useTelegramSnapshot, useTelegramTheme } from "@/lib/telegram/hooks";
 
 type ValidateResponse = {
   telegramId: string;
@@ -32,7 +32,7 @@ function getErrorMessage(error: unknown) {
 
 export function TelegramShell() {
   const { colorScheme, isTelegram } = useTelegramTheme();
-  const { initData, initDataUnsafe } = useTelegramInitData();
+  const { initData, initDataUnsafe } = useTelegramSnapshot();
 
   const [manualInitData, setManualInitData] = useState("");
   const [prompt, setPrompt] = useState("");
