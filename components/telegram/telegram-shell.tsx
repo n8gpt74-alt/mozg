@@ -53,8 +53,24 @@ const sectionMeta: Record<MenuSection, { label: string; hint: string }> = {
   },
 };
 
+const menuSections: MenuSection[] = ["session", "ai", "memory", "storage"];
+
 const AI_PROMPT_MAX_LENGTH = 4000;
 const AI_PROMPT_SOFT_LIMIT = 3400;
+const aiPromptPresets = [
+  "Собери короткий план задач на день на основе моей памяти.",
+  "Что из сохранённых заметок сейчас наиболее приоритетно?",
+  "Сформулируй 3 следующих шага по текущему проекту.",
+];
+const MEMORY_INPUT_MAX_LENGTH = 12_000;
+const MEMORY_INPUT_SOFT_LIMIT = 10_000;
+const memoryPromptPresets = [
+  "Клиент просит отчёт по статусу проекта к пятнице.",
+  "Нужно подготовить список рисков и план действий.",
+  "Согласовать ТЗ, дедлайн и ответственных по задачам.",
+];
+
+
 
 function getErrorMessage(error: unknown) {
   if (error instanceof Error) {
@@ -62,6 +78,14 @@ function getErrorMessage(error: unknown) {
   }
 
   return "Неизвестная ошибка";
+}
+
+function compactValue(value: string, head = 18, tail = 12) {
+  if (value.length <= head + tail + 1) {
+    return value;
+  }
+
+  return `${value.slice(0, head)}…${value.slice(-tail)}`;
 }
 
 export function TelegramShell() {
@@ -76,12 +100,17 @@ export function TelegramShell() {
   const [answer, setAnswer] = useState("");
   const [uploadPreview, setUploadPreview] = useState("");
   const [error, setError] = useState("");
-  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [isAsking, setIsAsking] = useState(false);
+  const [isSavingMemory, setIsSavingMemory] = useState(false);
+  const [isCreatingUploadUrl, setIsCreatingUploadUrl] = useState(false);
   const [activeSection, setActiveSection] = useState<MenuSection>("session");
   const [isCheckingSession, setIsCheckingSession] = useState(false);
   const [lastSessionCheckAt, setLastSessionCheckAt] = useState<string | null>(null);
   const [aiMatches, setAiMatches] = useState<MatchPreview[]>([]);
   const [lastAiResponseAt, setLastAiResponseAt] = useState<string | null>(null);
+  const [isAnswerCopied, setIsAnswerCopied] = useState(false);
+  const [memorySavePreview, setMemorySavePreview] = useState("");
+  const [lastMemorySavedAt, setLastMemorySavedAt] = useState<string | null>(null);
 
   const sessionRef = useRef<HTMLDivElement | null>(null);
   const aiRef = useRef<HTMLDivElement | null>(null);
@@ -110,18 +139,46 @@ export function TelegramShell() {
     };
   }, [effectiveInitData]);
 
+  const sessionSourceLabel = useMemo(() => {
+    if (initData) {
+      return "Telegram WebView";
+    }
+
+    if (manualInitData.trim()) {
+      return "Вручную (браузер)";
+    }
+
+    return "Не указан";
+  }, [initData, manualInitData]);
+
+  const initDataLength = effectiveInitData.length;
+  const initDataPreview = useMemo(() => {
+    if (!effectiveInitData) {
+      return null;
+    }
+
+    return compactValue(effectiveInitData);
+  }, [effectiveInitData]);
+
   const trimmedPrompt = useMemo(() => prompt.trim(), [prompt]);
   const promptLength = trimmedPrompt.length;
   const promptCharsLeft = AI_PROMPT_MAX_LENGTH - promptLength;
   const isPromptTooLong = promptLength > AI_PROMPT_MAX_LENGTH;
   const isPromptNearLimit = promptLength >= AI_PROMPT_SOFT_LIMIT;
-  const canAskAi = Boolean(authHeaders) && !isSubmitting && Boolean(trimmedPrompt) && !isPromptTooLong;
+  const canAskAi = Boolean(authHeaders) && !isAsking && Boolean(trimmedPrompt) && !isPromptTooLong;
+
+  const trimmedMemoryInput = useMemo(() => memoryInput.trim(), [memoryInput]);
+  const memoryLength = trimmedMemoryInput.length;
+  const memoryCharsLeft = MEMORY_INPUT_MAX_LENGTH - memoryLength;
+  const isMemoryTooLong = memoryLength > MEMORY_INPUT_MAX_LENGTH;
+  const isMemoryNearLimit = memoryLength >= MEMORY_INPUT_SOFT_LIMIT;
+  const canRemember = Boolean(authHeaders) && !isSavingMemory && Boolean(trimmedMemoryInput) && !isMemoryTooLong;
 
   const sectionStatus = useMemo<Record<MenuSection, SectionStatus>>(() => {
     const hasSession = Boolean(authInfo);
     const hasAuthSource = Boolean(effectiveInitData);
     const hasPrompt = Boolean(trimmedPrompt);
-    const hasMemory = Boolean(memoryInput.trim());
+    const hasMemory = Boolean(trimmedMemoryInput);
     const hasFileName = Boolean(fileName.trim());
 
     return {
@@ -146,8 +203,14 @@ export function TelegramShell() {
               : "Добавь вопрос",
       },
       memory: {
-        ready: hasSession && hasMemory,
-        note: !hasSession ? "Сначала подтверди сессию" : hasMemory ? "Текст готов" : "Добавь заметку",
+        ready: hasSession && hasMemory && !isMemoryTooLong,
+        note: !hasSession
+          ? "Сначала подтверди сессию"
+          : isMemoryTooLong
+            ? `Сократи заметку до ${MEMORY_INPUT_MAX_LENGTH} символов`
+            : hasMemory
+              ? "Текст готов"
+              : "Добавь заметку",
       },
       storage: {
         ready: hasSession && hasFileName,
@@ -160,12 +223,21 @@ export function TelegramShell() {
     fileName,
     isCheckingSession,
     isPromptTooLong,
-    memoryInput,
+    isMemoryTooLong,
+    trimmedMemoryInput,
     trimmedPrompt,
   ]);
 
   const readySectionsCount = useMemo(() => {
-    return (Object.keys(sectionStatus) as MenuSection[]).filter((section) => sectionStatus[section].ready).length;
+    return menuSections.filter((section) => sectionStatus[section].ready).length;
+  }, [sectionStatus]);
+
+  const completionPercent = useMemo(() => {
+    return Math.round((readySectionsCount / menuSections.length) * 100);
+  }, [readySectionsCount]);
+
+  const firstPendingSection = useMemo(() => {
+    return menuSections.find((section) => !sectionStatus[section].ready) ?? null;
   }, [sectionStatus]);
 
   const bestMatchPercent = useMemo(() => {
@@ -174,6 +246,14 @@ export function TelegramShell() {
     }
 
     return Math.round(Math.max(...aiMatches.map((match) => match.similarity)) * 100);
+  }, [aiMatches]);
+
+  const topAiMatches = useMemo(() => {
+    return aiMatches.slice(0, 3).map((match) => ({
+      ...match,
+      similarityPercent: Math.round(match.similarity * 100),
+      shortId: compactValue(match.id, 8, 6),
+    }));
   }, [aiMatches]);
 
   const validateSession = useCallback(async () => {
@@ -235,6 +315,13 @@ export function TelegramShell() {
     sectionRefs[section].current?.scrollIntoView({ behavior: "smooth", block: "start" });
   }
 
+  function handleClearManualInitData() {
+    setManualInitData("");
+    setAuthInfo(null);
+    setLastSessionCheckAt(null);
+    setError("");
+  }
+
   async function handleAsk() {
     if (!authHeaders || !trimmedPrompt) {
       return;
@@ -246,10 +333,11 @@ export function TelegramShell() {
     }
 
     try {
-      setIsSubmitting(true);
+      setIsAsking(true);
       setError("");
       setAnswer("");
       setAiMatches([]);
+      setIsAnswerCopied(false);
 
       const response = await fetch("/api/ai/complete", {
         method: "POST",
@@ -279,7 +367,7 @@ export function TelegramShell() {
       setAiMatches([]);
       setError(getErrorMessage(requestError));
     } finally {
-      setIsSubmitting(false);
+      setIsAsking(false);
     }
   }
 
@@ -287,6 +375,7 @@ export function TelegramShell() {
     setPrompt("");
     setAnswer("");
     setAiMatches([]);
+    setIsAnswerCopied(false);
     setError("");
   }
 
@@ -297,20 +386,71 @@ export function TelegramShell() {
     }
   }
 
-  async function handleRemember() {
-    if (!authHeaders || !memoryInput.trim()) {
+  function handleApplyPromptPreset(preset: string) {
+    setPrompt(preset);
+    setError("");
+    setIsAnswerCopied(false);
+  }
+
+  async function handleCopyAnswer() {
+    if (!answer) {
       return;
     }
 
     try {
-      setIsSubmitting(true);
+      if (!navigator.clipboard?.writeText) {
+        throw new Error("Буфер обмена недоступен в этом окружении");
+      }
+
+      await navigator.clipboard.writeText(answer);
+      setIsAnswerCopied(true);
+
+      window.setTimeout(() => {
+        setIsAnswerCopied(false);
+      }, 1600);
+    } catch (copyError) {
+      setError(getErrorMessage(copyError));
+    }
+  }
+
+  function handleMemoryKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
+    if ((event.ctrlKey || event.metaKey) && event.key === "Enter") {
+      event.preventDefault();
+      void handleRemember();
+    }
+  }
+
+  function handleApplyMemoryPreset(preset: string) {
+    setMemoryInput(preset);
+    setError("");
+  }
+
+  function handleClearMemoryState() {
+    setMemoryInput("");
+    setMemorySavePreview("");
+    setLastMemorySavedAt(null);
+    setError("");
+  }
+
+  async function handleRemember() {
+    if (!authHeaders || !trimmedMemoryInput) {
+      return;
+    }
+
+    if (isMemoryTooLong) {
+      setError(`Заметка слишком длинная. Максимум ${MEMORY_INPUT_MAX_LENGTH} символов.`);
+      return;
+    }
+
+    try {
+      setIsSavingMemory(true);
       setError("");
 
       const response = await fetch("/api/ai/embed", {
         method: "POST",
         headers: authHeaders,
         body: JSON.stringify({
-          content: memoryInput,
+          content: trimmedMemoryInput,
           metadata: {
             source: "telegram-ui",
           },
@@ -324,11 +464,18 @@ export function TelegramShell() {
       }
 
       setMemoryInput("");
-      setUploadPreview(`Память сохранена: ${payload.documentId}`);
+      setMemorySavePreview(`Память сохранена: ${payload.documentId ?? "без documentId"}`);
+      setLastMemorySavedAt(
+        new Date().toLocaleTimeString("ru-RU", {
+          hour: "2-digit",
+          minute: "2-digit",
+        }),
+      );
     } catch (requestError) {
+      setMemorySavePreview("");
       setError(getErrorMessage(requestError));
     } finally {
-      setIsSubmitting(false);
+      setIsSavingMemory(false);
     }
   }
 
@@ -338,7 +485,7 @@ export function TelegramShell() {
     }
 
     try {
-      setIsSubmitting(true);
+      setIsCreatingUploadUrl(true);
       setError("");
 
       const response = await fetch("/api/storage/upload-url", {
@@ -361,7 +508,7 @@ export function TelegramShell() {
     } catch (requestError) {
       setError(getErrorMessage(requestError));
     } finally {
-      setIsSubmitting(false);
+      setIsCreatingUploadUrl(false);
     }
   }
 
@@ -374,10 +521,32 @@ export function TelegramShell() {
         </CardHeader>
         <CardContent className="space-y-3">
           <p className="text-xs text-[var(--tg-theme-hint-color)]">
-            Готовность: {readySectionsCount}/4 блоков готовы к действию.
+            Готовность: {readySectionsCount}/{menuSections.length} блоков готовы к действию.
           </p>
+          <div className="space-y-2">
+            <div className="h-2 rounded-full bg-[var(--tg-theme-bg-color)]">
+              <div
+                className="h-full rounded-full bg-[var(--tg-theme-button-color)] transition-all"
+                style={{ width: `${completionPercent}%` }}
+              />
+            </div>
+            <div className="flex items-center justify-between gap-2 text-xs">
+              <span className="text-[var(--tg-theme-hint-color)]">Прогресс: {completionPercent}%</span>
+              {firstPendingSection ? (
+                <Button
+                  variant="outline"
+                  className="min-h-8 px-2 text-xs"
+                  onClick={() => goToSection(firstPendingSection)}
+                >
+                  Следующий шаг: {sectionMeta[firstPendingSection].label}
+                </Button>
+              ) : (
+                <span className="font-medium text-emerald-500 dark:text-emerald-400">Все блоки готовы</span>
+              )}
+            </div>
+          </div>
           <div className="grid grid-cols-2 gap-2">
-            {(Object.keys(sectionMeta) as MenuSection[]).map((section) => {
+            {menuSections.map((section) => {
               const status = sectionStatus[section];
 
               return (
@@ -440,15 +609,40 @@ export function TelegramShell() {
             {lastSessionCheckAt ? `Последняя проверка: ${lastSessionCheckAt}` : "Проверка ещё не запускалась"}
           </p>
 
+          <div className="grid grid-cols-2 gap-2 text-xs">
+            <p className="rounded-xl bg-[var(--tg-theme-bg-color)] p-2 text-[var(--tg-theme-hint-color)]">
+              Источник: <span className="font-medium text-[var(--tg-theme-text-color)]">{sessionSourceLabel}</span>
+            </p>
+            <p className="rounded-xl bg-[var(--tg-theme-bg-color)] p-2 text-[var(--tg-theme-hint-color)]">
+              initData: <span className="font-medium text-[var(--tg-theme-text-color)]">{initDataLength} симв.</span>
+            </p>
+          </div>
+
+          {initDataPreview ? (
+            <p className="break-all rounded-xl bg-[var(--tg-theme-bg-color)] p-2 text-xs text-[var(--tg-theme-hint-color)]">
+              Preview: <span className="text-[var(--tg-theme-text-color)]">{initDataPreview}</span>
+            </p>
+          ) : null}
+
           {isTelegram ? (
             <p>
               Пользователь Telegram: <strong>{initDataUnsafe?.user?.first_name ?? "неизвестно"}</strong>
             </p>
           ) : (
             <div className="space-y-2">
-              <p className="text-[var(--tg-theme-hint-color)]">
-                Режим браузера. Вставь raw initData для безопасной серверной валидации.
-              </p>
+              <div className="flex items-center justify-between gap-2">
+                <p className="text-[var(--tg-theme-hint-color)]">
+                  Режим браузера. Вставь raw initData для безопасной серверной валидации.
+                </p>
+                <Button
+                  variant="outline"
+                  className="min-h-8 px-2 text-xs"
+                  disabled={isCheckingSession || !manualInitData.trim()}
+                  onClick={handleClearManualInitData}
+                >
+                  Очистить initData
+                </Button>
+              </div>
               <Textarea
                 value={manualInitData}
                 onChange={(event) => setManualInitData(event.target.value)}
@@ -464,10 +658,13 @@ export function TelegramShell() {
           ) : null}
 
           {authInfo ? (
-            <p>
-              Сессия подтверждена: <strong>{authInfo.telegramUser.first_name}</strong>
-              {authInfo.telegramUser.username ? ` (@${authInfo.telegramUser.username})` : ""}
-            </p>
+            <div className="space-y-1">
+              <p>
+                Сессия подтверждена: <strong>{authInfo.telegramUser.first_name}</strong>
+                {authInfo.telegramUser.username ? ` (@${authInfo.telegramUser.username})` : ""}
+              </p>
+              <p className="text-xs text-[var(--tg-theme-hint-color)]">Telegram ID: {authInfo.telegramId}</p>
+            </div>
           ) : (
             <p className="text-[var(--tg-theme-hint-color)]">Сессия пока не подтверждена.</p>
           )}
@@ -486,6 +683,19 @@ export function TelegramShell() {
             onKeyDown={handlePromptKeyDown}
             placeholder="Например: Какие ключевые задачи на сегодня?"
           />
+          <div className="flex flex-wrap gap-2">
+            {aiPromptPresets.map((preset) => (
+              <Button
+                key={preset}
+                variant="secondary"
+                className="min-h-8 px-3 text-xs"
+                disabled={isAsking}
+                onClick={() => handleApplyPromptPreset(preset)}
+              >
+                {preset.length > 52 ? `${preset.slice(0, 52)}…` : preset}
+              </Button>
+            ))}
+          </div>
           <div className="flex items-center justify-between text-xs">
             <span
               className={
@@ -498,18 +708,26 @@ export function TelegramShell() {
             >
               {isPromptTooLong
                 ? `Превышение лимита: ${Math.abs(promptCharsLeft)} симв.`
-                : `Осталось символов: ${promptCharsLeft}` }
+                : `Осталось символов: ${promptCharsLeft}`}
             </span>
             <span className="text-[var(--tg-theme-hint-color)]">Ctrl/Cmd + Enter</span>
           </div>
-          <div className="flex gap-2">
-            <Button className="flex-1" disabled={!canAskAi} onClick={handleAsk}>
-              {isSubmitting ? "Генерирую ответ..." : "Получить ответ"}
+          <div className="flex flex-wrap gap-2">
+            <Button className="min-w-36 flex-1" disabled={!canAskAi} onClick={handleAsk}>
+              {isAsking ? "Генерирую ответ..." : "Получить ответ"}
             </Button>
             <Button
               variant="outline"
               className="px-4"
-              disabled={isSubmitting || (!prompt && !answer && !aiMatches.length)}
+              disabled={!answer || isAsking}
+              onClick={handleCopyAnswer}
+            >
+              {isAnswerCopied ? "Скопировано" : "Копировать"}
+            </Button>
+            <Button
+              variant="outline"
+              className="px-4"
+              disabled={isAsking || (!prompt && !answer && !aiMatches.length)}
               onClick={handleClearAskState}
             >
               Очистить
@@ -526,6 +744,16 @@ export function TelegramShell() {
                   ? `Контекст памяти: ${aiMatches.length} заметок, лучшая релевантность ~${bestMatchPercent ?? 0}%.`
                   : "Контекст памяти не использован для этого ответа."}
               </p>
+              {topAiMatches.length ? (
+                <ul className="mt-2 space-y-1 text-xs text-[var(--tg-theme-hint-color)]">
+                  {topAiMatches.map((match, index) => (
+                    <li key={match.id} className="flex items-center justify-between rounded-lg bg-[var(--tg-theme-secondary-bg-color)] px-2 py-1">
+                      <span>#{index + 1} • {match.shortId}</span>
+                      <span className="font-medium text-[var(--tg-theme-text-color)]">{match.similarityPercent}%</span>
+                    </li>
+                  ))}
+                </ul>
+              ) : null}
             </div>
           ) : null}
         </CardContent>
@@ -540,16 +768,57 @@ export function TelegramShell() {
           <Textarea
             value={memoryInput}
             onChange={(event) => setMemoryInput(event.target.value)}
+            onKeyDown={handleMemoryKeyDown}
             placeholder="Сохранить заметку в память"
           />
-          <Button
-            variant="secondary"
-            className="w-full"
-            disabled={!authHeaders || isSubmitting || !memoryInput.trim()}
-            onClick={handleRemember}
-          >
-            Сохранить заметку
-          </Button>
+          <div className="flex flex-wrap gap-2">
+            {memoryPromptPresets.map((preset) => (
+              <Button
+                key={preset}
+                variant="secondary"
+                className="min-h-8 px-3 text-xs"
+                disabled={isSavingMemory}
+                onClick={() => handleApplyMemoryPreset(preset)}
+              >
+                {preset.length > 52 ? `${preset.slice(0, 52)}…` : preset}
+              </Button>
+            ))}
+          </div>
+          <div className="flex items-center justify-between text-xs">
+            <span
+              className={
+                isMemoryTooLong
+                  ? "font-medium text-red-500"
+                  : isMemoryNearLimit
+                    ? "font-medium text-amber-500"
+                    : "text-[var(--tg-theme-hint-color)]"
+              }
+            >
+              {isMemoryTooLong
+                ? `Превышение лимита: ${Math.abs(memoryCharsLeft)} симв.`
+                : `Осталось символов: ${memoryCharsLeft}`}
+            </span>
+            <span className="text-[var(--tg-theme-hint-color)]">Ctrl/Cmd + Enter</span>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            <Button variant="secondary" className="min-w-36 flex-1" disabled={!canRemember} onClick={handleRemember}>
+              {isSavingMemory ? "Сохраняю..." : "Сохранить заметку"}
+            </Button>
+            <Button
+              variant="outline"
+              className="px-4"
+              disabled={isSavingMemory || (!memoryInput && !memorySavePreview)}
+              onClick={handleClearMemoryState}
+            >
+              Очистить
+            </Button>
+          </div>
+          {lastMemorySavedAt ? (
+            <p className="text-xs text-[var(--tg-theme-hint-color)]">Последнее сохранение: {lastMemorySavedAt}</p>
+          ) : null}
+          {memorySavePreview ? (
+            <p className="rounded-xl bg-[var(--tg-theme-bg-color)] p-3 text-xs">{memorySavePreview}</p>
+          ) : null}
         </CardContent>
       </Card>
 
@@ -563,10 +832,10 @@ export function TelegramShell() {
           <Button
             variant="outline"
             className="w-full"
-            disabled={!authHeaders || isSubmitting || !fileName.trim()}
+            disabled={!authHeaders || isCreatingUploadUrl || !fileName.trim()}
             onClick={handleCreateUploadUrl}
           >
-            Создать ссылку загрузки
+            {isCreatingUploadUrl ? "Создаю ссылку..." : "Создать ссылку загрузки"}
           </Button>
           {uploadPreview ? (
             <p className="break-all rounded-xl bg-[var(--tg-theme-bg-color)] p-3 text-xs">{uploadPreview}</p>
