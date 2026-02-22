@@ -13,7 +13,7 @@ export async function authenticateTelegramRequest(request: Request) {
   });
 
   const telegramId = String(validated.user.id);
-  const { client, accessToken } = await createTelegramSupabaseClient({
+  const client = await createTelegramSupabaseClient({
     telegramId,
     telegramUser: validated.user,
   });
@@ -23,6 +23,5 @@ export async function authenticateTelegramRequest(request: Request) {
     telegramUser: validated.user,
     initData,
     supabase: client,
-    supabaseAccessToken: accessToken,
   };
 }

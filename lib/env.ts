@@ -11,6 +11,13 @@ const serverEnvSchema = z.object({
   OPENAI_BASE_URL: z.string().url().optional(),
   OPENAI_CHAT_MODEL: z.string().min(1).default("openai/gpt-4.1-mini"),
   OPENAI_EMBED_MODEL: z.string().min(1).default("openai/text-embedding-3-small"),
+  OPENAI_REQUEST_TIMEOUT_MS: z.coerce.number().int().positive().default(20_000),
+  OPENAI_REQUEST_RETRIES: z.coerce.number().int().min(0).max(5).default(2),
+  API_RATE_LIMIT_WINDOW_SECONDS: z.coerce.number().int().positive().default(60),
+  API_RATE_LIMIT_VALIDATE_MAX: z.coerce.number().int().positive().default(20),
+  API_RATE_LIMIT_AI_COMPLETE_MAX: z.coerce.number().int().positive().default(20),
+  API_RATE_LIMIT_AI_EMBED_MAX: z.coerce.number().int().positive().default(20),
+  API_RATE_LIMIT_STORAGE_UPLOAD_URL_MAX: z.coerce.number().int().positive().default(20),
 });
 
 type ServerEnv = z.infer<typeof serverEnvSchema>;

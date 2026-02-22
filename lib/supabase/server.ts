@@ -75,7 +75,6 @@ async function ensureTelegramAuthUser({
   if (existingSession) {
     return {
       accessToken: existingSession.accessToken,
-      email: credentials.email,
     };
   }
 
@@ -105,7 +104,6 @@ async function ensureTelegramAuthUser({
 
   return {
     accessToken: signedInSession.accessToken,
-    email: credentials.email,
   };
 }
 
@@ -122,7 +120,7 @@ export async function createTelegramSupabaseClient({
     telegramUser,
   });
 
-  const client = createClient(env.NEXT_PUBLIC_SUPABASE_URL, env.NEXT_PUBLIC_SUPABASE_ANON_KEY, {
+  return createClient(env.NEXT_PUBLIC_SUPABASE_URL, env.NEXT_PUBLIC_SUPABASE_ANON_KEY, {
     auth: {
       autoRefreshToken: false,
       persistSession: false,
@@ -134,9 +132,4 @@ export async function createTelegramSupabaseClient({
       },
     },
   });
-
-  return {
-    client,
-    accessToken: session.accessToken,
-  };
 }

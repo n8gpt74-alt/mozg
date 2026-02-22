@@ -5,7 +5,7 @@ Telegram Mini App on Next.js App Router with:
 - Tailwind CSS + shadcn-style UI components
 - Supabase (PostgreSQL + pgvector + RLS + Storage)
 - Telegram initData server-side auth validation
-- Vercel AI SDK + OpenAI-compatible endpoint (embeddings + completions)
+- Vercel AI SDK + OpenAI-compatible endpoint (embeddings + streaming completions)
 
 ## 1) Setup
 
@@ -27,6 +27,15 @@ Required AI vars (OpenAI-compatible):
 - `OPENAI_BASE_URL` (for Polza: `https://api.polza.ai/api/v1`)
 - `OPENAI_CHAT_MODEL` (e.g. `openai/gpt-4.1-mini`)
 - `OPENAI_EMBED_MODEL` (e.g. `openai/text-embedding-3-small`)
+- `OPENAI_REQUEST_TIMEOUT_MS` (default: `20000`)
+- `OPENAI_REQUEST_RETRIES` (default: `2`)
+
+Rate limiting vars:
+- `API_RATE_LIMIT_WINDOW_SECONDS` (default: `60`)
+- `API_RATE_LIMIT_VALIDATE_MAX` (default: `20`)
+- `API_RATE_LIMIT_AI_COMPLETE_MAX` (default: `20`)
+- `API_RATE_LIMIT_AI_EMBED_MAX` (default: `20`)
+- `API_RATE_LIMIT_STORAGE_UPLOAD_URL_MAX` (default: `20`)
 
 ## 2) Supabase migrations
 
@@ -66,7 +75,10 @@ Endpoints:
 
 - `POST /api/telegram/validate` – validates hash, ensures Supabase Auth user, upserts Telegram profile
 - `POST /api/ai/embed` – writes embedding into pgvector table
-- `POST /api/ai/complete` – retrieves nearest memories + generates completion
+- `POST /api/ai/complete` – streams completion (`application/x-ndjson`) with `meta`, `text-delta`, `done` chunks
+- `GET /api/ai/memory` – list user memory notes with optional `source`/`search` filters
+- `DELETE /api/ai/memory` – delete memory note by `id`
 - `POST /api/storage/upload-url` – creates signed upload URL in user folder
+- `POST /api/storage/verify-upload` – verifies uploaded object exists in user folder
 
 No cookie sessions are used.
